@@ -1,0 +1,121 @@
+#!/usr/bin/python3
+#
+# Python APDU terminal
+#
+# Quick note - to install pyscard, you may need to install "libpcsclite-dev" and "swig"
+# as well as all the usual build essentials first, at least on Ubuntu 20.10
+#
+import os, time, smartcard
+from smartcard.ATR import ATR
+from smartcard.util import toHexString
+from smartcard.System import readers as smartCardReaders
+from smartcard.CardMonitoring import CardMonitor, CardObserver
+
+# TODO: move this class to a separate file
+# This isn't really required for our use-case, but eh, it's nice to have
+class ActiveCard(CardObserver):
+
+    def __init__(self):
+        """
+        Card object initializer
+        """
+        self.cards = set()
+
+    # Important note: although this uses loops and lists, we will only explicitly
+    # support using ONE card at a time in this terminal, since that's
+    # all we need (and it simplifies the code)
+    def update(self, observable, actions):
+        try:
+            (addedcards, removedcards) = actions
+            for card in addedcards:
+                atr = toHexString(card.atr)
+
+                # Create ATR object and do some processing for info
+                atrObject = ATR(card.atr)
+
+                # Only create object if checksum is okay
+                if(atrObject.checksumOK):
+                    self.cards.add(atr)
+                    print(f"\n\n💳 Card inserted")
+                    print(f"ATR:\t\t{atr}")
+                    print(f"T0 support:\t{atrObject.isT0Supported()}")
+                    print(f"T1 support:\t{atrObject.isT1Supported()}")
+                    print(f"T15 support:\t{atrObject.isT15Supported()}")
+
+            for card in removedcards:
+                try:
+                    if(card):
+                        atr = toHexString(card.atr)
+                        self.cards.remove(atr)
+                        print(f"\n💳 Card removed (ATR: {atr})")
+                except (KeyError, IndexError):
+                    pass
+        except Exception as e:
+            # We don't really care about this
+            pass
+
+# Hello world :)
+print("APDU terminal initializing...")
+
+# For now, assume only one card reader and use that
+# This is where we could implement card reader selection if needed
+cardReaders = smartCardReaders()
+reader = cardReaders[0]
+connection = reader.createConnection()
+print(f"Using card reader: {reader}")
+
+# Card monitor
+cardMonitor = CardMonitor()
+activeCard = ActiveCard()
+cardMonitor.addObserver(activeCard)
+
+# Main REPL loop
+while(True):
+    try:
+        # Get command line and process if it's not empty
+        cmdline = input("APDU> ")
+        if(cmdline.strip()):
+            try:
+
+                # Build actual APDU by splitting the input string
+                # (i.e. "00 A2 FF") into actual hex representations
+                cmdBytes = cmdline.split()
+                actualAPDU = []
+                for byte in cmdBytes:
+                    actualAPDU.append(int(str(byte), 16))
+
+                # Connect to card and send APDU
+                # TODO: persist connections(?) and perhaps look into
+                # actually disconnecting. There seems to be no ill effect
+                # from not doing that, though, so it's fine for now
+                connection.connect()
+
+                # Note: sw = status words
+                data, sw1, sw2 = connection.transmit(actualAPDU)
+
+                # Print response
+                print(f"resp: {format(sw1, 'x').zfill(2)} {format(sw2, 'x').zfill(2)}")
+                if(data):
+                    print("---------------------------------------")
+                    try:
+                        print("Response contains data payload:\n")
+                        for byte in data:
+                            print(f"{format(byte, 'x').zfill(2)}", end=" ")
+                        print("")
+                    except Exception as e:
+                        print("Response data payload cannot be decoded:\n")
+                        print(data)
+                    print("---------------------------------------")
+
+            except smartcard.Exceptions.NoCardException:
+                print("Error - no card")
+
+            except Exception as e:
+                # This is here so that we could write error handlers
+                # as needed
+                raise e
+
+    except (KeyboardInterrupt, EOFError):
+        # CTRL+C / CTRL+D / CTRL+backslash should all result in a clean exit
+        print("")
+        exit(0)
